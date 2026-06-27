@@ -16,7 +16,7 @@ uniform vec2 resolution;
 float skewed_inv_distance(float dist, float max_dist, float expon) {
 	float norm_factor = 1.0;
 	float inv_dist = max_dist - dist;
-	float norm = norm_factor * (inv_dist / max_dist);
+	float norm = MAX(0.0, norm_factor * (inv_dist / max_dist));
 	float max_norm = norm_factor;
 	float distorted = pow(norm/max_norm, expon);
 	float max_distorted = pow(max_norm, expon);
