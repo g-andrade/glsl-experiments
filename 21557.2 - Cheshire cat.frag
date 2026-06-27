@@ -29,7 +29,7 @@ float skewed_inv_distance(float dist, float max_dist, float expon, float norm_va
 	norm_val = MAX(0.0, MIN(0.1, norm_val/10.0));
 	float norm_factor = 0.9 + norm_val;
 	float inv_dist = max_dist - dist;
-	float norm = norm_factor * (inv_dist / max_dist);
+	float norm = MAX(0.0, norm_factor * (inv_dist / max_dist));
 	float max_norm = norm_factor;
 	float distorted = pow(norm/max_norm, expon);
 	float max_distorted = pow(max_norm, expon);
