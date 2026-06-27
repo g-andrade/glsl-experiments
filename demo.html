@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>GLSL Demo</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #000; overflow: hidden; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    #ui {
+      position: fixed; top: 12px; left: 12px;
+      display: flex; flex-direction: column; gap: 8px;
+      pointer-events: none;
+    }
+    label.pick {
+      pointer-events: all;
+      display: inline-block;
+      background: rgba(0,0,0,0.65); color: #fff;
+      font: 13px/1 monospace; padding: 7px 12px;
+      border-radius: 5px; border: 1px solid rgba(255,255,255,0.25);
+      cursor: pointer; user-select: none;
+    }
+    label.pick:hover { background: rgba(50,50,50,0.85); }
+    input[type=file] { display: none; }
+    #name { color: rgba(255,255,255,0.5); font: 11px/1 monospace; }
+    #err {
+      background: rgba(160,0,0,0.85); color: #fff;
+      font: 11px/1.5 monospace; padding: 8px 12px; border-radius: 5px;
+      max-width: 520px; white-space: pre-wrap; display: none;
+    }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="ui">
+  <label class="pick">Open .frag <input type="file" id="pick" accept=".frag,.glsl"></label>
+  <div id="name">Animaláceo cor-de-rosa (atrator de Hénon)</div>
+  <div id="err"></div>
+</div>
+<script>
+// ── setup ──────────────────────────────────────────────────────────────────────
+
+const canvas = document.getElementById('c');
+const nameEl = document.getElementById('name');
+const errEl  = document.getElementById('err');
+
+const gl = canvas.getContext('webgl');
+if (!gl) { errEl.style.display = 'block'; errEl.textContent = 'WebGL not supported.'; }
+
+// ── GLSL sources ───────────────────────────────────────────────────────────────
+
+// Minimal vertex shader for user shaders (they use gl_FragCoord, not a UV varying)
+const QUAD_VS = `
+attribute vec2 pos;
+void main() { gl_Position = vec4(pos, 0.0, 1.0); }
+`;
+
+// Vertex shader for shaders that use the glslsandbox `surfacePosition` varying.
+// surfacePosition = pos/2 makes the mouse-transform formula
+//   (mouse - fragUV) * surfaceSize + surfacePosition
+// simplify to (mouse - 0.5) when surfaceSize=vec2(1,1), i.e. centred [−0.5,0.5] coords.
+const QUAD_VS_SURFACE = `
+attribute vec2 pos;
+varying vec2 surfacePosition;
+void main() {
+  gl_Position = vec4(pos, 0.0, 1.0);
+  surfacePosition = pos / 2.0;
+}
+`;
+
+// Blit: copy a texture to the screen
+const BLIT_VS = `
+attribute vec2 pos;
+varying vec2 vUV;
+void main() { gl_Position = vec4(pos, 0.0, 1.0); vUV = pos * 0.5 + 0.5; }
+`;
+const BLIT_FS = `
+precision mediump float;
+uniform sampler2D tex;
+varying vec2 vUV;
+void main() { gl_FragColor = texture2D(tex, vUV); }
+`;
+
+// Default shader (Hénon attractor) — loaded on startup so something is visible
+const DEFAULT_FS = `
+#ifdef GL_ES
+precision mediump float;
+#endif
+
+#extension GL_OES_standard_derivatives : enable
+
+#define PI 3.14159265359
+#define X_THING 0.002
+#define Y_THING 0.3
+#define square(x) ((x) * (x))
+
+uniform float time;
+uniform vec2 mouse;
+uniform vec2 resolution;
+
+float magnitude(vec2 v) {
+  return sqrt(square(v.x) + square(v.y));
+}
+
+vec3 compute_color(float a, float b, vec2 position) {
+  float mapped_x = 1.0 - (a * square(position.x)) + position.y;
+  float mapped_y = b * position.x;
+  vec2 mapped_position = vec2(mapped_x, mapped_y);
+  float dist = distance(position, mapped_position);
+  float red   = pow(dist, -(0.5 + pow(X_THING, 0.5)));
+  float green = pow(dist, -(0.5 + pow(magnitude(vec2(X_THING, Y_THING)), 0.5)));
+  float blue  = pow(dist, -(0.5 + pow(Y_THING, 0.5)));
+  return vec3(red, 0.0, blue);
+}
+
+void main(void) {
+  float a_amplitude = 0.1 + (2.0 * X_THING);
+  float b_amplitude = 0.3 + Y_THING;
+  float a = 1.4 + (a_amplitude * sin(10.0 * PI * time));
+  float b = 0.3 + (b_amplitude * sin(PI * time));
+  float range = 5.0 + (10.0 * X_THING);
+  vec2 position = range * ((2.0 * (gl_FragCoord.xy / resolution.xy)) - 1.0);
+  gl_FragColor = vec4(compute_color(a, b, position), 1.0);
+}
+`;
+
+// ── WebGL helpers ──────────────────────────────────────────────────────────────
+
+function compile(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+    const log = gl.getShaderInfoLog(s);
+    gl.deleteShader(s);
+    throw new Error(log);
+  }
+  return s;
+}
+
+function link(vsSrc, fsSrc) {
+  const vs = compile(gl.VERTEX_SHADER, vsSrc);
+  const fs = compile(gl.FRAGMENT_SHADER, fsSrc);
+  const p = gl.createProgram();
+  gl.attachShader(p, vs); gl.attachShader(p, fs);
+  gl.linkProgram(p);
+  gl.deleteShader(vs); gl.deleteShader(fs);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+    const log = gl.getProgramInfoLog(p);
+    gl.deleteProgram(p);
+    throw new Error(log);
+  }
+  return p;
+}
+
+function makeFBO(w, h) {
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  const fbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  return { tex, fbo };
+}
+
+function freeFBOs(pair) {
+  pair.forEach(f => { gl.deleteFramebuffer(f.fbo); gl.deleteTexture(f.tex); });
+}
+
+const quadBuf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+gl.bufferData(gl.ARRAY_BUFFER,
+  new Float32Array([-1,-1, 1,-1, -1,1, -1,1, 1,-1, 1,1]), gl.STATIC_DRAW);
+
+function quad(prog) {
+  gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+  const loc = gl.getAttribLocation(prog, 'pos');
+  gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+  gl.drawArrays(gl.TRIANGLES, 0, 6);
+}
+
+const blitProg = link(BLIT_VS, BLIT_FS);
+
+// ── state ──────────────────────────────────────────────────────────────────────
+
+let userProg = null;
+let fbos     = null;   // [current, previous] ping-pong pair
+let fboIdx   = 0;
+let t0       = null;
+let W = 0, H = 0;
+let mouse = [0, 0];
+
+function resize() {
+  const w = window.innerWidth, h = window.innerHeight;
+  if (w === W && h === H) return;
+  W = canvas.width  = w;
+  H = canvas.height = h;
+  if (fbos) { freeFBOs(fbos); fbos = [makeFBO(W, H), makeFBO(W, H)]; fboIdx = 0; }
+}
+
+window.addEventListener('resize', resize);
+resize();
+
+canvas.addEventListener('mousemove', e => {
+  const r = canvas.getBoundingClientRect();
+  // glslsandbox convention: [0,1] normalised, Y=0 at bottom
+  mouse = [(e.clientX - r.left) / W, 1 - (e.clientY - r.top) / H];
+});
+
+// ── render loop ────────────────────────────────────────────────────────────────
+
+function frame(ts) {
+  requestAnimationFrame(frame);
+  resize();
+  if (!userProg) return;
+
+  if (t0 === null) t0 = ts;
+  const t = (ts - t0) / 1000;
+
+  const cur  = fbos[fboIdx];
+  const prev = fbos[1 - fboIdx];
+
+  // render user shader → off-screen FBO
+  gl.bindFramebuffer(gl.FRAMEBUFFER, cur.fbo);
+  gl.viewport(0, 0, W, H);
+  gl.useProgram(userProg);
+
+  const ul = n => gl.getUniformLocation(userProg, n);
+  // null locations are silently ignored by WebGL uniform setters
+  gl.uniform1f(ul('time'),        t);
+  gl.uniform2f(ul('mouse'),       mouse[0], mouse[1]);
+  gl.uniform2f(ul('resolution'),  W, H);
+  gl.uniform2f(ul('surfaceSize'), 1.0, 1.0); // glslsandbox compat (null loc = no-op)
+  const bbLoc = ul('backbuffer');
+  if (bbLoc !== null) {
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, prev.tex);
+    gl.uniform1i(bbLoc, 0);
+  }
+  quad(userProg);
+
+  // blit FBO → screen
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, W, H);
+  gl.useProgram(blitProg);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, cur.tex);
+  gl.uniform1i(gl.getUniformLocation(blitProg, 'tex'), 0);
+  quad(blitProg);
+
+  fboIdx = 1 - fboIdx;
+}
+
+requestAnimationFrame(frame);
+
+// ── loading ────────────────────────────────────────────────────────────────────
+
+function loadSrc(src, name) {
+  errEl.style.display = 'none';
+  try {
+    const vs = src.includes('surfacePosition') ? QUAD_VS_SURFACE : QUAD_VS;
+    const prog = link(vs, src);
+    if (userProg) gl.deleteProgram(userProg);
+    userProg = prog;
+    if (fbos) freeFBOs(fbos);
+    fbos = [makeFBO(W, H), makeFBO(W, H)];
+    fboIdx = 0;
+    t0 = null;
+    nameEl.textContent = name;
+  } catch (e) {
+    errEl.style.display = 'block';
+    errEl.textContent = e.message;
+  }
+}
+
+document.getElementById('pick').addEventListener('change', e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const r = new FileReader();
+  r.onload = ev => loadSrc(ev.target.result, file.name);
+  r.readAsText(file);
+  e.target.value = ''; // allow re-picking the same file
+});
+
+// Load the default shader immediately
+loadSrc(DEFAULT_FS, 'Animaláceo cor-de-rosa (atrator de Hénon)');
+</script>
+</body>
+</html>
