@@ -1,3 +1,4 @@
+// vim: set noet ts=4 sw=4: -*- mode: glsl; indent-tabs-mode: t; tab-width: 4 -*-
 #ifdef GL_ES
 precision mediump float;
 #endif
